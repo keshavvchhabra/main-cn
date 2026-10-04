@@ -1,0 +1,5 @@
+basicConstraints       = CA:FALSE
+keyUsage               = critical, digitalSignature, keyEncipherment
+extendedKeyUsage       = serverAuth
+subjectAltName         = DNS:app.team1.test, DNS:api.team1.test
+authorityKeyIdentifier = keyid
