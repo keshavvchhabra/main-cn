@@ -1,0 +1,34 @@
+
+[1m== 1) HEAD - inspect cache headers (curl -I) ==[0m
+HTTP/2 200 
+content-length: 228
+x-backend: A
+cache-control: public, max-age=60
+etag: "55df56e6b3ea9005"
+last-modified: Wed, 01 Jan 2025 00:00:00 GMT
+
+[1m== 2) Full GET - server sends the whole body (200) ==[0m
+HTTP/2 200 
+content-length: 228
+x-backend: B
+cache-control: public, max-age=60
+etag: "55df56e6b3ea9005"
+last-modified: Wed, 01 Jan 2025 00:00:00 GMT
+
+[1m== 3) Conditional GET with If-None-Match: "55df56e6b3ea9005"  -> expect 304 ==[0m
+HTTP/2 304 
+x-backend: B
+cache-control: public, max-age=60
+etag: "55df56e6b3ea9005"
+last-modified: Wed, 01 Jan 2025 00:00:00 GMT
+
+[1m== 4) Conditional GET with a stale ETag -> expect full 200 ==[0m
+HTTP/2 200 
+content-length: 228
+x-backend: A
+cache-control: public, max-age=60
+etag: "55df56e6b3ea9005"
+last-modified: Wed, 01 Jan 2025 00:00:00 GMT
+
+Fresh cache hit: open https://app.team1.test/api/catalog in a browser, DevTools > Network,
+reload within 60 s (click the link, don't hard-refresh): Size column shows '(disk cache)' / '(memory cache)'.

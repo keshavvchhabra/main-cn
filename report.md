@@ -92,7 +92,21 @@ When the project is finished, a client Mac on the team LAN can:
 
 ### 4.2 IP & service inventory
 
-Values come from the team's `config.env` (MAC4 copy) and `evidence/phase1/A1-netinfo-*.txt`. Fill in the blank cells from each Mac's `scripts/netinfo.sh` output.
+The project ran on two different Wi-Fi networks. Every IP in the repo comes from `config.env`, so moving networks only meant editing that file and re-running `./render.sh`.
+
+**Demo network (4 Oct, 10.7.x.x Wi-Fi with a Ruckus access point).** These values are taken from the Wireshark captures in Section 6 (Figures 1–5):
+
+| Machine | Role | IPv4 | MAC address (Wi-Fi, private address) | Services seen in capture |
+|---|---|---|---|---|
+| Mac 1 | Primary DNS | 10.7.21.254 | 6e:4d:a5:73:f3:12 | dnsmasq 53/UDP (Fig. 1) |
+| Mac 2 | Edge nginx | 10.7.19.102 | de:18:32:22:fd:bd | nginx 443/TCP (Fig. 2–5) |
+| Mac 3 | Backend A | ________ | ________ | 3001/TCP |
+| Mac 4 (`backend-b`) | Backend B + client | 10.7.16.171 | 32:8b:e8:5a:f3:0e | client; Backend B 3002/TCP (Fig. 2) |
+| Default gateway | Wi-Fi AP | — | c0:c5:20:6f:38:ee (Ruckus Wireless) | used only for internet traffic |
+
+Packets from Mac 4 to Mac 1 and Mac 2 are addressed to **their own MAC addresses**, not to the gateway's. That means all three are on the **same subnet**, and frames are delivered directly inside one broadcast domain. Only internet-bound packets (e.g. to 98.91.66.56 in Fig. 9) go to the Ruckus gateway's MAC.
+
+**Earlier setup network (3 Oct, 10.142.107.0/24).** These values come from `config.env` and `evidence/phase1/A1-netinfo-*.txt`:
 
 | Machine | Interface | IPv4 / prefix | Gateway | MAC address | Services |
 |---|---|---|---|---|---|
@@ -101,14 +115,14 @@ Values come from the team's `config.env` (MAC4 copy) and `evidence/phase1/A1-net
 | Mac 3 | en0 | 10.142.107.97/24 | 10.142.107.38 | ________ | Backend A :3001 · Ph2: dnsmasq :53, nginx :443 |
 | Mac 4 | en0 | 10.142.107.96/24 | 10.142.107.38 | 9e:28:37:36:f9:34 | Backend B :3002 |
 
-Subnet mask `255.255.255.0` (prefix `/24`) was recorded on Mac 4. All four hosts share one broadcast domain behind a single access point: a star topology at the physical level.
+Mac 4's MAC address is different on the two networks: 9e:28:… on the first, 32:8b:… on the second. This is macOS's *Private Wi-Fi address* feature, which gives each Wi-Fi network its own randomised MAC address. Either way, all four hosts share one broadcast domain behind a single access point, which is a star topology at the physical level.
 
-**DNS records** (`dns/team.hosts.tmpl`, TTL 30 s):
+**DNS records** (`dns/team.hosts.tmpl`, TTL 30 s). Values on the demo network:
 
 | Name | Type | Value |
 |---|---|---|
-| `app.team1.test` | A | Mac 2 (10.142.107.105) |
-| `api.team1.test` | A | Mac 2 (10.142.107.105) |
+| `app.team1.test` | A | Mac 2 (10.7.19.102), seen in the DNS response in Fig. 1 |
+| `api.team1.test` | A | Mac 2 (10.7.19.102) |
 | `edge.team1.test` | A | Mac 2 |
 | `dns1.team1.test` | A | Mac 1 |
 | `dns2.team1.test` | A | Mac 3 (backup DNS) |
@@ -119,11 +133,11 @@ Subnet mask `255.255.255.0` (prefix `/24`) was recorded on Mac 4. All four hosts
 
 ```mermaid
 flowchart TB
-    subgraph LAN["Private LAN 10.142.107.0/24  (Wi-Fi AP / router = gateway 10.142.107.38)"]
-        M1["Mac 1<br/>Primary DNS (dnsmasq :53)<br/>+ test client"]
-        M2["Mac 2<br/>Edge nginx<br/>TLS termination + LB :443"]
+    subgraph LAN["Private Wi-Fi LAN (one subnet, one access point)"]
+        M1["Mac 1 · 10.7.21.254<br/>Primary DNS (dnsmasq :53)<br/>+ test client"]
+        M2["Mac 2 · 10.7.19.102<br/>Edge nginx<br/>TLS termination + LB :443"]
         M3["Mac 3<br/>Backend A :3001<br/>(Ph2: backup DNS, standby edge)"]
-        M4["Mac 4<br/>Backend B :3002<br/>+ test client"]
+        M4["Mac 4 · 10.7.16.171<br/>Backend B :3002<br/>+ test client"]
     end
     M4 -- "1. DNS query app.team1.test (UDP 53)" --> M1
     M4 -- "2. HTTPS (TCP 443, TLS)" --> M2
@@ -142,7 +156,7 @@ sequenceDiagram
     participant E as Edge nginx (Mac 2)
     participant B as Backend A/B (Mac 3/4)
     C->>D: DNS query A app.team1.test (UDP, ephemeral → 53)
-    D-->>C: A 10.142.107.105, TTL 30
+    D-->>C: A 10.7.19.102, TTL 30
     C->>E: TCP SYN (ephemeral → 443)
     E-->>C: SYN-ACK
     C->>E: ACK
@@ -244,6 +258,22 @@ Clients are pointed at Mac 1 with `scripts/client-dns.sh primary`, which runs `n
 
 Verification: `dig app.team1.test` shows `ANSWER: app.team1.test. 30 IN A <Mac 2>` and `SERVER: <Mac 1>#53`. `nslookup` gives the same result.
 
+**Evidence: DNS query and response on the wire**
+
+![Figure 1: Wireshark, DNS query and response for app.team1.test](screenshots/01-dns-query-response.png)
+
+*Figure 1. Wireshark filter `dns.qry.name == "app.team1.test"`.*
+
+| Frame | Time (s) | Source → Destination | What it shows |
+|---|---|---|---|
+| 324 | 4.954865 | 10.7.16.171 (Mac 4) → 10.7.21.254 (Mac 1) | `Standard query 0x310e A app.team1.test`. UDP, src port **63041** (ephemeral) → dst port **53** |
+| 325 | 4.965569 | 10.7.21.254 → 10.7.16.171 | `Standard query response 0x310e A app.team1.test A 10.7.19.102`, i.e. the answer is **Mac 2, the edge** |
+
+- The response arrives in about **10.7 ms**.
+- Both packets carry the same transaction ID, **0x310e**, which is how the client matches the reply to its question.
+- The packet detail pane shows the full stack: *Ethernet II → IPv4 → UDP → DNS*. That is the Link, Network, Transport and Application layers of Section 4.4 in a single packet.
+- The DNS server (Mac 1) and the IP it returns (Mac 2) are **different machines**. DNS only supplies the address. The connection itself is made in Figure 2.
+
 **DNS resolution vs connection.** DNS only turns a name into an IP address, using UDP/53 to Mac 1. The TCP/TLS/HTTP connection that follows goes to a **different machine** (Mac 2, TCP/443). DNS is never on the data path.
 
 ### Task C: Two simple backends (Mac 3, Mac 4)
@@ -276,6 +306,10 @@ Client → app.team1.test → Mac 2 (nginx, 443)
 
 Verification: `scripts/lb-test.sh 10` should alternate `X-Backend: A, B, A, B …` with the summary line `A=5 B=5 errors=0`.
 
+**Evidence: round robin.** In the caching demo (Figure 7), successive requests are answered by **A → B → (A) → B → A**. The `(A)` is a request that `cache-demo.sh` makes silently to read the ETag before step 3. Counting it, the sequence is strict A/B alternation. All requests went to the same name, `https://app.team1.test`, and the client never used a backend IP.
+
+**Evidence: the edge opens its own connection to the backend.** In Figure 2, frames 56653–56654 come **0.1 s after** the client connects to the edge. They show `10.7.19.102:62963 → 10.7.16.171:3002 [SYN]` and the reply `[SYN, ACK]`. This is nginx on Mac 2 opening a **new TCP connection** to Backend B (port 3002) on Mac 4. The client's TCP connection ends at the edge, and the edge creates a separate one to the backend.
+
 ### Task E: HTTPS / TLS
 
 `tls/make-certs.sh` builds a small private PKI with OpenSSL:
@@ -290,6 +324,13 @@ nginx terminates TLS (`listen 443 ssl; http2 on; ssl_protocols TLSv1.2 TLSv1.3`)
 
 **Handshake (TLS 1.2 view):** ClientHello (SNI, ALPN, cipher suites, random) → ServerHello (chosen cipher, random) → Certificate → ServerKeyExchange (ECDHE) → ClientKeyExchange → ChangeCipherSpec → Finished (both sides) → encrypted Application Data. In TLS 1.3 everything after ServerHello is encrypted, including the Certificate. That is why `capture.sh` defaults to `--tls-max 1.2` for the evidence capture.
 
+**What we observed (Figures 4 and 5).** The handshake shown was negotiated as **TLS 1.3**. The server's first flight is a single segment containing *Server Hello, Change Cipher Spec, Application Data, Application Data*. The Certificate, EncryptedExtensions and Finished messages are **already encrypted** inside those "Application Data" records, so no separate `Certificate` packet appears. The ClientHello is still readable:
+
+- **SNI = `app.team1.test`**, which is how nginx knows which certificate to present.
+- **ALPN = `h2`, `http/1.1`**, visible as text in the hex pane. The client offers HTTP/2 and the edge accepts it (the caching demo responses are `HTTP/2 200`, Fig. 7).
+
+For a capture where the Certificate message is visible in plain text, use `scripts/capture.sh 1.2`. The 1.2 captures are saved as `MAC4/evidence/captures/flow-tls1.2-*.pcap` (Figure 8).
+
 ### Task F: HTTP caching
 
 `scripts/cache-demo.sh` runs against `/api/catalog`:
@@ -302,6 +343,23 @@ nginx terminates TLS (`listen 443 ssl; http2 on; ssl_protocols TLSv1.2 TLSv1.3`)
 | 4 | GET + stale ETag | `200`, full body again |
 
 The ETag is a SHA-256 of the body, so it is **identical on A and B**. Conditional requests still validate after the load balancer switches backends.
+
+**Evidence: caching demo run on Mac 4** (also saved as text in `MAC4/evidence/phase1/D1-caching.txt`)
+
+![Figure 7: cache-demo.sh output showing 200, 304, and 200 responses](screenshots/07-cache-demo.png)
+
+*Figure 7. `scripts/cache-demo.sh` against `https://app.team1.test/api/catalog`.*
+
+| Step | Response | Served by | Key headers | Meaning |
+|---|---|---|---|---|
+| 1 HEAD (`curl -I`) | `HTTP/2 200` | A | `cache-control: public, max-age=60`, `etag: "55df56e6b3ea9005"`, `last-modified: Wed, 01 Jan 2025 00:00:00 GMT` | Cache headers are present |
+| 2 Full GET | `HTTP/2 200`, `content-length: 228` | B | same ETag | Full body sent |
+| 3 GET + `If-None-Match: "55df56e6b3ea9005"` | **`HTTP/2 304`** | B | no `content-length`, no body | Copy still valid: **conditional request** saves the body |
+| 4 GET + stale ETag | `HTTP/2 200`, `content-length: 228` | A | same ETag | Validator mismatch, so **full new response** |
+
+- **A and B return the same ETag**, `"55df56e6b3ea9005"`, so the 304 works whichever backend the load balancer picks.
+- Every response is **HTTP/2**, so the edge negotiated h2 with the client through ALPN.
+- The backends themselves only speak HTTP/1.1. nginx translates between the two.
 
 The three cases:
 - **Fresh cache hit:** within `max-age`, the browser serves from disk/memory cache with no network request at all (DevTools shows *(disk cache)*).
@@ -322,6 +380,97 @@ The three cases:
 | Load balancing | `lb-test.sh` output: X-Backend alternates | — |
 | Ports | DNS: ephemeral → **53/UDP**; HTTPS: ephemeral → **443/TCP** | — |
 | Reliability | Seq/Ack numbers increase by bytes sent; ACKs confirm receipt | *Statistics → Flow Graph* |
+
+#### G.1 Capturing the request
+
+![Figure 8: capture.sh saving the pcap](screenshots/08-capture-script.png)
+
+*Figure 8. `scripts/capture.sh 1.2` on Mac 4 asks for `sudo` (tcpdump needs it), makes one request, and saves `evidence/captures/flow-tls1.2-191633.pcap`. All saved captures are in `MAC4/evidence/captures/`: `flow-tls1.2-191633.pcap`, `flow-tls1.3-191732.pcap`, `flow-tls1.2-192632.pcap`.*
+
+#### G.2 DNS (Application layer, UDP/53)
+
+See **Figure 1** in Task B. Mac 4 asks Mac 1 for `app.team1.test` (UDP 63041 → 53) and gets back **10.7.19.102** (Mac 2).
+
+#### G.3 TCP three-way handshake (Transport layer)
+
+![Figure 2: SYN packets, including client to edge and edge to backend](screenshots/02-tcp-syn-client-edge-backend.png)
+
+*Figure 2. Filter `tcp.flags.syn==1`. The selected row is the client's SYN to the edge.*
+
+![Figure 3: the full client to edge TCP/TLS conversation](screenshots/03-https-session-client-edge.png)
+
+*Figure 3. Filter `ip.addr==10.7.16.171 && ip.addr==10.7.19.102 && tcp.port==443`. This is one complete HTTPS conversation (29 packets).*
+
+| Frame | Time (s) | Direction | Flags / content | Seq | Ack |
+|---|---|---|---|---|---|
+| 56632 | 727.798610 | Mac 4 :53342 → Mac 2 :443 | **SYN** (MSS=1460, WS=64, SACK_PERM) | 0 | — |
+| 56633 | 727.807884 | Mac 2 :443 → Mac 4 :53342 | **SYN, ACK** | 0 | 1 |
+| 56634 | 727.808048 | Mac 4 → Mac 2 | **ACK**: handshake complete | 1 | 1 |
+| 56635 | 727.810742 | Mac 4 → Mac 2 | TLS **Client Hello** (TCP payload 324 bytes) | 1 | 1 |
+| 56637 | 727.817334 | Mac 2 → Mac 4 | ACK | 1 | **325** |
+| 56640 | 727.856520 | Mac 4 → Mac 2 | ACK after server's first flight | 325 | **1704** |
+| 56645 / 56646 | 727.896–.900 | Mac 2 → Mac 4 | ACKs for client's encrypted records | 1704 | **389**, **545** |
+
+- **Socket pair:** client `10.7.16.171:53342` (ephemeral port) ↔ server `10.7.19.102:443` (well-known HTTPS port). The SYN → SYN-ACK round trip took **9.3 ms**.
+- **No application data is sent before the handshake.** The Client Hello is the first segment with a payload, and it comes after the final ACK (56634).
+- **Reliability (sequence and acknowledgement numbers):** every ACK number equals 1 + the total bytes received so far.
+  - Client Hello = 324 bytes, so Ack = 1 + 324 = **325**.
+  - The server's first flight = 1448 + 255 = 1703 bytes (frames 56638–56639), so the client acks **1704**.
+  - The client then sends 6 + 58 bytes (frames 56641–56642), so the server acks 325 + 64 = **389**. After 86 + 70 more bytes, it acks **545**.
+
+  Receiving these cumulative ACKs is how the sender knows nothing was lost. A gap would trigger a retransmission.
+- **Window scaling:** `WS=64` and `[TCP Window Update]` (56636) are TCP flow control. The receiver advertises how much buffer it has.
+
+#### G.4 TLS handshake (between Transport and Application)
+
+![Figure 4: TLS handshake messages, Client Hello and Server Hello](screenshots/04-tls-handshake.png)
+
+*Figure 4. Filter `ip.addr==10.7.19.102 && tcp.port==443 && tls.handshake`. The hex pane shows `app.team1.test` (SNI) and `h2 http/1.1` (ALPN) in plain text.*
+
+| Frame | Time (s) | Direction | TLS message |
+|---|---|---|---|
+| 56635 | 727.810742 | client → edge | **Client Hello** (SNI=app.team1.test, ALPN h2/http1.1, cipher suites, key share) |
+| 56638 | 727.856397 | edge → client | **Server Hello, Change Cipher Spec**, + encrypted EncryptedExtensions / **Certificate** / CertificateVerify / Finished |
+| 56641 | 727.891240 | client → edge | **Change Cipher Spec** + encrypted client Finished |
+| 56642 → | 727.891+ | both | **Application Data**: the HTTP/2 request and response |
+
+The handshake took about **80 ms**, from Client Hello (727.811) to the client's Finished (727.891). The client checked the edge's certificate against the team CA in its keychain, and no `-k` flag was used.
+
+#### G.5 HTTP is encrypted on the wire
+
+![Figure 5: all TLS records between client and edge](screenshots/05-tls-encrypted-records.png)
+
+*Figure 5. Filter `ip.addr==10.7.19.102 && tcp.port==443 && tls`. After the handshake, every record is "Application Data". Wireshark cannot see the method, path, or headers.*
+
+![Figure 6: tls.record.content_type==23 across the whole interface](screenshots/06-tls-application-data-all.png)
+
+*Figure 6. Filter `tls.record.content_type==23` (Application Data) over the whole Wi-Fi interface. It also matches other HTTPS traffic from the laptop (e.g. 104.18.32.47, 172.64.148.235). The hex pane is unreadable ciphertext. This is why every Figure 2–5 filter includes the edge IP **10.7.19.102**: to isolate our own conversation.*
+
+The HTTP headers (`X-Backend`, `Cache-Control`, `ETag`, `HTTP/2 200` …) are visible only **on the client** (Figure 7, `curl -v`/`-I`). The client holds the TLS session keys and Wireshark does not. Encryption covers everything above TCP. The IP addresses, ports, and TCP flags in Figures 2–3 remain visible because routers need them to deliver the packets.
+
+#### G.6 Ports used in one request
+
+| Leg | Source (ephemeral) | Destination (well-known / fixed) | Protocol | Figure |
+|---|---|---|---|---|
+| DNS query | 10.7.16.171:**63041** | 10.7.21.254:**53** | UDP | 1 |
+| HTTPS to edge | 10.7.16.171:**53342** | 10.7.19.102:**443** | TCP + TLS | 2, 3 |
+| Edge to backend | 10.7.19.102:**62963** | 10.7.16.171:**3002** (Backend B) | TCP, plain HTTP/1.1 | 2 |
+
+#### G.7 What went wrong on the first capture attempt
+
+The first Wireshark capture did **not** contain our request.
+
+![Figure 9: first capture, the only port-443 SYN went to an internet host](screenshots/09-first-capture-wrong-syn.png)
+
+*Figure 9. First capture (`wireshark_Wi-FiS5FYW3`), filter `tcp.flags.syn == 1 && tcp.port == 443`. The only handshake is to **98.91.66.56**, an internet server: the destination MAC is the Ruckus gateway, not a team Mac. This is unrelated background traffic, not our edge.*
+
+![Figure 10: first capture, no packets to the edge](screenshots/10-first-capture-no-edge-traffic.png)
+
+*Figure 10. The same capture filtered on `ip.addr == 10.7.19.102 && tcp.port == 443` shows **zero packets**. The request to the edge was not made while this capture was running.*
+
+**Fix:** we started a new capture, made the request to `https://app.team1.test` while it was running, and filtered on the edge's IP. That produced Figures 2–5.
+
+**Lesson:** a capture only contains what happened during it, and a laptop on Wi-Fi is always sending other HTTPS traffic. Filtering by our edge's IP and port is what separates our flow from the rest. A port filter alone matched the wrong host.
 
 ---
 
